@@ -18,7 +18,9 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+import json
+
+from tools import _get_groq_client, search_listings, suggest_outfit, create_fit_card
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +94,63 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse query with LLM
+    try:
+        client = _get_groq_client()
+        parse_prompt = (
+            f"Extract search parameters from this query: \"{query}\"\n"
+            "Return ONLY a JSON object with exactly these keys:\n"
+            "  description (str): keywords describing the item\n"
+            "  size (str or null): size if mentioned, else null\n"
+            "  max_price (float or null): price ceiling if mentioned, else null\n"
+            "Example: {\"description\": \"vintage graphic tee\", \"size\": \"M\", \"max_price\": 30.0}"
+        )
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": parse_prompt}],
+            temperature=0,
+        )
+        raw = response.choices[0].message.content.strip()
+        # extract JSON from response in case the LLM wraps it in markdown
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        session["parsed"] = json.loads(raw[start:end])
+    except Exception:
+        session["parsed"] = {"description": query, "size": None, "max_price": None}
+
+    parsed = session["parsed"]
+
+    # Step 3: search listings — early exit if nothing found
+    session["search_results"] = search_listings(
+        parsed.get("description", query),
+        size=parsed.get("size"),
+        max_price=parsed.get("max_price"),
+    )
+
+    if not session["search_results"]:
+        desc = parsed.get("description", query)
+        size_part = f", size {parsed['size']}" if parsed.get("size") else ""
+        price_part = f" under ${parsed['max_price']}" if parsed.get("max_price") else ""
+        session["error"] = (
+            f"No listings found for '{desc}'{size_part}{price_part}. "
+            "Try broader keywords, a different size, or a higher budget."
+        )
+        return session
+
+    # Step 4: select top result
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: suggest outfit
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+
+    # Step 6: create fit card
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
     return session
 
 
